@@ -18,6 +18,8 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
+#include "stm32f1xx_hal.h"
+#include "stm32f1xx_hal_flash.h"
 #include "stm32f1xx_hal_tim.h"
 #include <stdint.h>
 
@@ -98,6 +100,10 @@ uint32_t sticks = 0;
 uint16_t TMR_OVC = 0;
 uint8_t EDGE_STATE = 0;
 
+uint8_t obstacle_count = 0;
+uint8_t lap_count = 0;
+uint8_t junc_count = 0;
+
 Buttons start_Bt;
 Buttons junc_Bt;
 motor rightMotor, leftMotor;
@@ -122,6 +128,11 @@ void Delay_With_IR_Update(uint32_t);
 void us_trigger(void);
 uint32_t DWT_Delay_Init(void);
 __STATIC_INLINE void DWT_Delay_us(volatile uint32_t);
+uint8_t Get_Scaled_Reading(uint16_t);
+void SevenSeg_LineFollow_Update(uint8_t, uint8_t, uint8_t, uint8_t, uint8_t);
+void Perform_Obstacle_Sequence(void);
+void SevenSeg_Clear(void);
+void SevenSeg_Servo_Anim(uint8_t);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -236,6 +247,7 @@ int main(void) {
   uint32_t last_time_update = 0;
   uint32_t last_time_us_update = 0;
   uint32_t last_time_ping = 0;
+  uint8_t show = 0;
   HAL_TIM_Base_Start(&htim4);
   HAL_TIM_Base_Start(&htim3);
   HAL_TIM_OC_Start(&htim4, TIM_CHANNEL_4);
@@ -281,13 +293,12 @@ int main(void) {
       last_time_toggle = HAL_GetTick();
     }
 
-    if (!start2 && start1 && ((HAL_GetTick() - last_time_update) > 500)) {
-      uint32_t val = r2 >> 2;
-      val = val / 100;
-      if (val > 9) {
-        val = 9;
+    if (!start2 && start1 && ((HAL_GetTick() - last_time_update) > 2000)) {
+      if (show < 2) {
+        show++;
+      } else {
+        show = 0;
       }
-      SevenSeg_Update(val);
       last_time_update = HAL_GetTick();
     }
 
@@ -297,11 +308,26 @@ int main(void) {
 
       low_l2 = (l2 < low_l2) ? l2 : low_l2;
       low_r2 = (r2 < low_r2) ? r2 : low_r2;
+      switch (show) {
+      case 0:
+        SevenSeg_Update(Get_Scaled_Reading(low_r2));
+        break;
+
+      case 1:
+        SevenSeg_Update(Get_Scaled_Reading((high_r2 + low_r2) / 2));
+        break;
+
+      case 2:
+        SevenSeg_Update(Get_Scaled_Reading(high_r2));
+        break;
+
+      default:
+        break;
+      }
     }
 
     if (start1 && start2 && !obs) {
       // forward
-      ir_seven_seg();
       Line_Following();
 
       // __HAL_TIM_SET_COMPARE(rightMotor.tim, rightMotor.channel,
@@ -324,12 +350,11 @@ int main(void) {
       // Optional: If distance is too far, turn off the display
       if (Difference < 30000) { // If echo takes >30ms (too far)
         if (dist < 15) {
-          TIM2->CCR2 = 2000;
           obs = 1;
           __HAL_TIM_SET_COMPARE(rightMotor.tim, rightMotor.channel, 0);
           __HAL_TIM_SET_COMPARE(leftMotor.tim, leftMotor.channel, 0);
+          Perform_Obstacle_Sequence();
         } else {
-          TIM2->CCR2 = 1000;
           obs = 0;
         }
       }
@@ -811,7 +836,7 @@ void Delay_With_IR_Update(uint32_t ms) {
     l2 = adc_raw_val[0];
 
     // 2. Update Display
-    ir_seven_seg();
+    SevenSeg_LineFollow_Update(l2 > th_l2, r2 > th_r2, 1, 1, obs);
   }
 }
 
@@ -822,12 +847,22 @@ void Line_Following(void) {
   if (junc) {
     __HAL_TIM_SET_COMPARE(rightMotor.tim, rightMotor.channel, 0);
     __HAL_TIM_SET_COMPARE(leftMotor.tim, leftMotor.channel, 0);
+    SevenSeg_LineFollow_Update(l2 > th_l2, r2 > th_r2, 0, 0, obs);
+    junc_count++;
+    uint32_t show_lap_dur = HAL_GetTick();
     while (junc) {
       // Refresh Sensors & Display inside the wait loop!
+      if (junc_count >= 3) {
+        junc_count = 0;
+        lap_count++;
+      }
       r2 = adc_raw_val[1];
       l2 = adc_raw_val[0];
-      ir_seven_seg();
-
+      if ((HAL_GetTick() - show_lap_dur) < 2000) {
+        SevenSeg_Update((lap_count > 9) ? 9 : lap_count);
+      } else {
+        SevenSeg_LineFollow_Update(l2 > th_l2, r2 > th_r2, 0, 0, obs);
+      }
       junc_Bt.cur = stableB14;
       if (!junc_Bt.cur && junc_Bt.prev)
         junc_Bt.state = 1;
@@ -838,6 +873,7 @@ void Line_Following(void) {
       junc_Bt.prev = junc_Bt.cur;
     }
 
+    SevenSeg_LineFollow_Update(l2 > th_l2, r2 > th_r2, 1, 1, obs);
     set_direction(&rightMotor, forward);
     set_direction(&leftMotor, forward);
     Apply_Motor_State(&rightMotor);
@@ -853,6 +889,8 @@ void Line_Following(void) {
   set_direction(&leftMotor, forward);
   Apply_Motor_State(&rightMotor);
   Apply_Motor_State(&leftMotor);
+  SevenSeg_LineFollow_Update(l2 > th_l2, r2 > th_r2, l2 < th_l2, r2 < th_r2,
+                             obs);
   __HAL_TIM_SET_COMPARE(rightMotor.tim, rightMotor.channel, rightMotor.speed);
   __HAL_TIM_SET_COMPARE(leftMotor.tim, leftMotor.channel, leftMotor.speed);
 }
@@ -903,6 +941,120 @@ __STATIC_INLINE void DWT_Delay_us(volatile uint32_t au32_microseconds) {
   au32_microseconds *= au32_ticks;
   while ((DWT->CYCCNT - au32_initial_ticks) < au32_microseconds - au32_ticks)
     ;
+}
+
+uint8_t Get_Scaled_Reading(uint16_t adc_val) {
+  // 1. Scale 12-bit (4096) down to 10-bit (1024) to match image spec
+  uint16_t val_10bit = adc_val / 4;
+
+  // 2. Map 0-1023 to 0-9
+  uint8_t disp = val_10bit / 100;
+  if (disp > 9)
+    disp = 9;
+
+  return disp;
+}
+
+void SevenSeg_LineFollow_Update(uint8_t left_ir_on, uint8_t right_ir_on,
+                                uint8_t left_motor_on, uint8_t right_motor_on,
+                                uint8_t obstacle_on) {
+
+  // --- Line Position Indicators (a, g, d) ---
+  // Logic:
+  // Center (g) = Both sensors see line (or stable)
+  // Left (a)   = Only Left sees line
+  // Right (d)  = Only Right sees line
+  uint8_t pos_center = (left_ir_on && right_ir_on);
+  uint8_t pos_left = (left_ir_on && !right_ir_on);
+  uint8_t pos_right = (!left_ir_on && right_ir_on);
+
+  // If lost (neither), we might default to Center or keep all OFF.
+  // Here we strictly follow detection.
+
+  HAL_GPIO_WritePin(GPIOB, a_Pin,
+                    pos_left ? GPIO_PIN_SET : GPIO_PIN_RESET); // Top: Left
+  HAL_GPIO_WritePin(GPIOA, g_Pin,
+                    pos_center ? GPIO_PIN_SET : GPIO_PIN_RESET); // Mid: Center
+  HAL_GPIO_WritePin(GPIOB, d_Pin,
+                    pos_right ? GPIO_PIN_SET : GPIO_PIN_RESET); // Bot: Right
+
+  // --- IR Sensor Readings (b, c) ---
+  // Mapping: b (Top Right) = Left Sensor, c (Bot Right) = Right Sensor
+  // (You can swap these if physical layout differs)
+  HAL_GPIO_WritePin(GPIOB, b_Pin, left_ir_on ? GPIO_PIN_SET : GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOB, c_Pin, right_ir_on ? GPIO_PIN_SET : GPIO_PIN_RESET);
+
+  // --- Motor Status (f, e) ---
+  // f (Top Left) = Left Motor, e (Bot Left) = Right Motor
+  HAL_GPIO_WritePin(GPIOB, f_Pin,
+                    left_motor_on ? GPIO_PIN_SET : GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOB, e_Pin,
+                    right_motor_on ? GPIO_PIN_SET : GPIO_PIN_RESET);
+
+  // --- Obstacle Indicator (DP) ---
+  HAL_GPIO_WritePin(GPIOB, dp_Pin, obstacle_on ? GPIO_PIN_SET : GPIO_PIN_RESET);
+}
+
+void Perform_Obstacle_Sequence(void) {
+  // 1. Stop Motors
+  __HAL_TIM_SET_COMPARE(rightMotor.tim, rightMotor.channel, 0);
+  __HAL_TIM_SET_COMPARE(leftMotor.tim, leftMotor.channel, 0);
+
+  // 2. Display PREVIOUS count (2 seconds)
+  SevenSeg_Update(obstacle_count);
+  HAL_Delay(2000);
+
+  // 3. Servo Action 0 degrees (g + b)
+  TIM2->CCR2 = 1000;
+  SevenSeg_Servo_Anim(0);
+  HAL_Delay(1000); // Wait for servo to move/clear
+
+  // 4. Servo Action 90 degrees (g only)
+  TIM2->CCR2 = 1500;
+  SevenSeg_Servo_Anim(1);
+  HAL_Delay(1000);
+
+  // 5. Servo Action 180 degrees (g + c)
+  TIM2->CCR2 = 2000;
+  SevenSeg_Servo_Anim(2);
+  HAL_Delay(1000);
+
+  // Return Servo to center (optional, good practice)
+  TIM2->CCR2 = 1000;
+
+  // 6. Update Count (Max 9)
+  if (obstacle_count < 9)
+    obstacle_count++;
+
+  // 7. Display NEW count (2 seconds)
+  SevenSeg_Update(obstacle_count);
+  HAL_Delay(2000);
+
+  // 8. Resume (Handled by main loop state)
+}
+
+void SevenSeg_Clear(void) {
+  HAL_GPIO_WritePin(GPIOB, a_Pin | b_Pin | c_Pin | d_Pin | e_Pin | f_Pin,
+                    GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOA, g_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOB, dp_Pin, GPIO_PIN_RESET);
+}
+// Display logic specifically for the Servo animation (b, c, g)
+void SevenSeg_Servo_Anim(uint8_t angle_state) {
+  SevenSeg_Clear();
+
+  // Always Turn on G (Center) for all servo states
+  HAL_GPIO_WritePin(GPIOA, g_Pin, GPIO_PIN_SET);
+
+  if (angle_state == 0) {
+    // 0 degrees -> g + b ON
+    HAL_GPIO_WritePin(GPIOB, b_Pin, GPIO_PIN_SET);
+  } else if (angle_state == 1) {
+    // 90 degrees -> g ON only (already set above)
+  } else if (angle_state == 2) {
+    // 180 degrees -> g + c ON
+    HAL_GPIO_WritePin(GPIOB, c_Pin, GPIO_PIN_SET);
+  }
 }
 /* USER CODE END 4 */
 
