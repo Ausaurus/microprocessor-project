@@ -53,8 +53,8 @@ typedef enum { forward, backward } direction;
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-#define BASE_SPEED 5000
-#define BRAKE_SPEED 3000
+#define BASE_SPEED 4900
+#define BRAKE_SPEED 5700
 #define TURN_SPEED 8000
 #define STOP_DELAY_MS 250
 #define TRIG_PIN GPIO_PIN_12
@@ -133,6 +133,7 @@ void SevenSeg_LineFollow_Update(uint8_t, uint8_t, uint8_t, uint8_t, uint8_t);
 void Perform_Obstacle_Sequence(void);
 void SevenSeg_Clear(void);
 void SevenSeg_Servo_Anim(uint8_t);
+void Delay_With_US_Update(uint32_t);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -343,13 +344,13 @@ int main(void) {
       // GPIO_PIN_RESET); HAL_GPIO_WritePin(GPIOA, GPIO_PIN_7, GPIO_PIN_SET);
     }
 
-    if ((HAL_GetTick() - last_time_us_update) > 500) {
+    if ((HAL_GetTick() - last_time_us_update) > 250) {
       DISTANCE = Difference / 58;
       uint32_t dist = DISTANCE;
 
       // Optional: If distance is too far, turn off the display
       if (Difference < 30000) { // If echo takes >30ms (too far)
-        if (dist < 15) {
+        if (dist < 13) {
           obs = 1;
           __HAL_TIM_SET_COMPARE(rightMotor.tim, rightMotor.channel, 0);
           __HAL_TIM_SET_COMPARE(leftMotor.tim, leftMotor.channel, 0);
@@ -840,8 +841,34 @@ void Delay_With_IR_Update(uint32_t ms) {
   }
 }
 
+void Delay_With_US_Update(uint32_t ms) {
+  uint32_t start = HAL_GetTick();
+  while ((HAL_GetTick() - start) < ms) {
+    // 1. Refresh global variables from DMA
+    r2 = adc_raw_val[1];
+    l2 = adc_raw_val[0];
+    DISTANCE = Difference / 58;
+    uint32_t dist = DISTANCE;
+
+    // Optional: If distance is too far, turn off the display
+    if (Difference < 30000) { // If echo takes >30ms (too far)
+      if (dist < 13) {
+        obs = 1;
+        __HAL_TIM_SET_COMPARE(rightMotor.tim, rightMotor.channel, 0);
+        __HAL_TIM_SET_COMPARE(leftMotor.tim, leftMotor.channel, 0);
+        Perform_Obstacle_Sequence();
+      } else {
+        obs = 0;
+      }
+    }
+
+    // 2. Update Display
+    SevenSeg_LineFollow_Update(l2 > th_l2, r2 > th_r2, 1, 1, obs);
+  }
+}
+
 void Line_Following(void) {
-  if (r2 > th_r2 && l2 > th_l2) {
+  if (adc_raw_val[1] > th_r2 && adc_raw_val[0] > th_l2) {
     junc = 1;
   }
   if (junc) {
@@ -872,6 +899,15 @@ void Line_Following(void) {
       junc = !junc_Bt.state;
       junc_Bt.prev = junc_Bt.cur;
     }
+    Apply_Motor_State(&rightMotor);
+    Apply_Motor_State(&leftMotor);
+    __HAL_TIM_SET_COMPARE(rightMotor.tim, rightMotor.channel, BRAKE_SPEED);
+    __HAL_TIM_SET_COMPARE(leftMotor.tim, leftMotor.channel, 0);
+    Delay_With_IR_Update(300);
+
+    __HAL_TIM_SET_COMPARE(rightMotor.tim, rightMotor.channel, 0);
+    __HAL_TIM_SET_COMPARE(leftMotor.tim, leftMotor.channel, 0);
+    Delay_With_IR_Update(600);
 
     SevenSeg_LineFollow_Update(l2 > th_l2, r2 > th_r2, 1, 1, obs);
     set_direction(&rightMotor, forward);
@@ -881,10 +917,10 @@ void Line_Following(void) {
     __HAL_TIM_SET_COMPARE(rightMotor.tim, rightMotor.channel, BASE_SPEED);
     __HAL_TIM_SET_COMPARE(leftMotor.tim, leftMotor.channel, BASE_SPEED + 800);
 
-    Delay_With_IR_Update(500);
+    Delay_With_US_Update(400);
   }
-  rightMotor.speed = BASE_SPEED * (r2 < th_r2);
-  leftMotor.speed = BASE_SPEED * (l2 < th_l2);
+  rightMotor.speed = BASE_SPEED * (adc_raw_val[1] < th_r2);
+  leftMotor.speed = BASE_SPEED * (adc_raw_val[0] < th_l2);
   set_direction(&rightMotor, forward);
   set_direction(&leftMotor, forward);
   Apply_Motor_State(&rightMotor);
@@ -964,7 +1000,7 @@ void SevenSeg_LineFollow_Update(uint8_t left_ir_on, uint8_t right_ir_on,
   // Center (g) = Both sensors see line (or stable)
   // Left (a)   = Only Left sees line
   // Right (d)  = Only Right sees line
-  uint8_t pos_center = (left_ir_on && right_ir_on);
+  uint8_t pos_center = (!left_ir_on && !right_ir_on);
   uint8_t pos_left = (left_ir_on && !right_ir_on);
   uint8_t pos_right = (!left_ir_on && right_ir_on);
 
